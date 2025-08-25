@@ -2,6 +2,7 @@ import torch
 import evaluate
 import numpy as np
 import optuna
+import toml
 from datasets import load_dataset
 from transformers import (
     AutoModelForSequenceClassification,
@@ -11,41 +12,9 @@ from transformers import (
     DataCollatorWithPadding,
 )
 
-# --- Configuration Globale ---
-# Utiliser un modèle léger et un sous-ensemble du dataset pour aller plus vite
-MODEL_NAME = "distilbert-base-uncased"
-DATASET_NAME = "imdb"
-# Pour un test rapide, on utilise un petit sous-ensemble des données
-# Mettez `None` pour utiliser le dataset complet (beaucoup plus long !)
-NUM_SAMPLES_TRAIN = 1000
-NUM_SAMPLES_EVAL = 500
+# --- 1. Définition de la fonction d'évaluation ---
+# Pas de changement ici, mais on la place avant pour la clarté
 
-# --- 1. Chargement et préparation des données ---
-
-print(f"Chargement du tokenizer pour le modèle {MODEL_NAME}...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-print(f"Chargement du dataset {DATASET_NAME}...")
-# On charge un petit sous-ensemble pour la rapidité
-dataset = load_dataset(DATASET_NAME, split=f"train[:{NUM_SAMPLES_TRAIN}]+test[:{NUM_SAMPLES_EVAL}]")
-# On divise à nouveau en train/test
-dataset = dataset.train_test_split(test_size=0.3, shuffle=True, seed=42)
-
-# Fonction pour tokeniser les données
-def tokenize_function(examples):
-    return tokenizer(examples["text"], truncation=True, padding=False)
-
-print("Tokenisation du dataset...")
-tokenized_datasets = dataset.map(tokenize_function, batched=True)
-# On retire la colonne "text" qui n'est plus nécessaire et peut causer des erreurs
-tokenized_datasets = tokenized_datasets.remove_columns(["text"])
-
-# Data collator pour créer les batches de manière dynamique
-data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
-# --- 2. Définition de la fonction d'évaluation ---
-
-print("Préparation de la métrique d'évaluation (accuracy)...")
 accuracy_metric = evaluate.load("accuracy")
 
 def compute_metrics(eval_pred):
@@ -53,79 +22,108 @@ def compute_metrics(eval_pred):
     predictions = np.argmax(predictions, axis=1)
     return accuracy_metric.compute(predictions=predictions, references=labels)
 
-# --- 3. Définition de la fonction "Objective" pour Optuna ---
 
-# C'est ici que la magie opère.
-# Optuna va appeler cette fonction à chaque "essai" (trial)
-# avec une nouvelle combinaison d'hyperparamètres.
-def objective(trial):
-    # On charge un nouveau modèle à chaque essai pour éviter les poids pré-entraînés
-    model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+# --- 2. Définition de la fonction "Objective" pour Optuna ---
 
-    # Définition de l'espace de recherche des hyperparamètres
-    training_args = TrainingArguments(
-        output_dir=f"./results/trial_{trial.number}",
-        # Hyperparamètres à optimiser
-        learning_rate=trial.suggest_float("learning_rate", 1e-5, 5e-5, log=True),
-        per_device_train_batch_size=trial.suggest_categorical("per_device_train_batch_size", [8, 16, 32]),
-        num_train_epochs=trial.suggest_int("num_train_epochs", 1, 3),
-        weight_decay=trial.suggest_float("weight_decay", 0.0, 0.3),
+# La fonction objective est maintenant plus générique.
+# Elle prend en paramètre les éléments qui dépendent de la configuration.
+def objective_factory(model_name, tokenized_datasets, data_collator):
+    """Crée la fonction objective pour Optuna."""
 
-        # Arguments fixes
-        per_device_eval_batch_size=16,
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        load_best_model_at_end=True,
-        metric_for_best_model="accuracy",
-        greater_is_better=True,
-        logging_dir='./logs',
-        logging_steps=50,
-        disable_tqdm=False, # Mettre à True pour des logs plus propres
-        report_to="none", # On désactive les intégrations (W&B, etc.)
-    )
+    def objective(trial):
+        # On charge un nouveau modèle à chaque essai pour éviter les poids pré-entraînés
+        model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=2)
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized_datasets["train"],
-        eval_dataset=tokenized_datasets["test"],
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics,
-    )
+        training_args = TrainingArguments(
+            output_dir=f"./results/trial_{trial.number}",
+            # Hyperparamètres à optimiser
+            learning_rate=trial.suggest_float("learning_rate", 1e-5, 5e-5, log=True),
+            per_device_train_batch_size=trial.suggest_categorical("per_device_train_batch_size", [8, 16, 32]),
+            num_train_epochs=trial.suggest_int("num_train_epochs", 1, 3),
+            weight_decay=trial.suggest_float("weight_decay", 0.0, 0.3),
 
-    # Lancement de l'entraînement
-    trainer.train()
+            # Arguments fixes
+            per_device_eval_batch_size=16,
+            evaluation_strategy="epoch",
+            save_strategy="epoch",
+            load_best_model_at_end=True,
+            metric_for_best_model="accuracy",
+            greater_is_better=True,
+            logging_dir='./logs',
+            logging_steps=50,
+            disable_tqdm=False,
+            report_to="none",
+        )
 
-    # Évaluation finale sur le set de test
-    eval_result = trainer.evaluate()
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized_datasets["train"],
+            eval_dataset=tokenized_datasets["test"],
+            data_collator=data_collator,
+            compute_metrics=compute_metrics,
+        )
 
-    # On retourne la métrique qu'Optuna doit maximiser
-    return eval_result["eval_accuracy"]
+        trainer.train()
+        eval_result = trainer.evaluate()
+        return eval_result["eval_accuracy"]
 
-# --- 4. Lancement de l'étude d'optimisation ---
+    return objective
 
-if __name__ == "__main__":
+# --- 3. Fonction Principale ---
+
+def main():
+    # Chargement de la configuration depuis le fichier TOML
+    print("Chargement de la configuration depuis config.toml...")
+    config = toml.load("config.toml")
+
+    model_config = config["model"]
+    dataset_config = config["dataset"]
+    optim_config = config["optimization"]
+
     # On vérifie si un GPU est disponible
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Utilisation du device : {device}")
 
-    # Création de l'étude Optuna.
-    # La direction est "maximize" car nous voulons la plus grande accuracy possible.
+    # --- Préparation des données (déplacé dans main) ---
+    print(f"Chargement du tokenizer pour le modèle {model_config['name']}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_config['name'])
+
+    print(f"Chargement du dataset {dataset_config['name']}...")
+    # Gestion de l'utilisation du dataset complet si num_samples est -1
+    train_split = f"train[:{dataset_config['num_samples_train']}]" if dataset_config['num_samples_train'] > 0 else "train"
+    test_split = f"test[:{dataset_config['num_samples_eval']}]" if dataset_config['num_samples_eval'] > 0 else "test"
+    dataset = load_dataset(dataset_config['name'], split=f"{train_split}+{test_split}")
+
+    dataset = dataset.train_test_split(test_size=0.3, shuffle=True, seed=42)
+
+    def tokenize_function(examples):
+        return tokenizer(examples["text"], truncation=True, padding=False)
+
+    print("Tokenisation du dataset...")
+    tokenized_datasets = dataset.map(tokenize_function, batched=True)
+    tokenized_datasets = tokenized_datasets.remove_columns(["text"])
+    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+
+    # --- Lancement de l'étude d'optimisation ---
     study = optuna.create_study(
         direction="maximize",
-        study_name="huggingface_optimization",
-        # Pruner: arrête les essais peu prometteurs en avance
+        study_name=optim_config['study_name'],
         pruner=optuna.pruners.MedianPruner()
     )
 
-    # Lancement de l'optimisation pour N essais
-    # Augmentez le nombre d'essais pour une recherche plus exhaustive
-    N_TRIALS = 10
-    print(f"\nLancement de l'optimisation Optuna pour {N_TRIALS} essais...")
-    study.optimize(objective, n_trials=N_TRIALS)
+    # Création de la fonction objective avec les bons paramètres
+    objective_func = objective_factory(
+        model_name=model_config['name'],
+        tokenized_datasets=tokenized_datasets,
+        data_collator=data_collator
+    )
 
-    # --- 5. Affichage des résultats ---
+    n_trials = optim_config['n_trials']
+    print(f"\nLancement de l'optimisation Optuna pour {n_trials} essais...")
+    study.optimize(objective_func, n_trials=n_trials)
+
+    # --- Affichage des résultats ---
     print("\n=================================================")
     print("=== Optimisation terminée ! ===")
     print(f"Nombre d'essais terminés : {len(study.trials)}")
@@ -135,7 +133,8 @@ if __name__ == "__main__":
     for key, value in study.best_trial.params.items():
         print(f"    - {key}: {value}")
     print("=================================================")
+    print(f"\nPour visualiser les résultats, lancez :")
+    print(f"optuna-dashboard sqlite:///{optim_config['study_name']}.db")
 
-    # Vous pouvez visualiser les résultats avec `optuna-dashboard`
-    # sqlite:///huggingface_optimization.db
-    # (Nécessite `pip install optuna-dashboard`)
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,22 @@
+# Fichier de dépendances pour l'environnement d'optimisation
+
+# PyTorch - Note: Le Dockerfile gérera l'installation CPU/GPU
+# Nous listons ici la version CPU par défaut.
+torch
+torchvision
+torchaudio
+
+# Écosystème Hugging Face
+transformers
+datasets
+accelerate
+evaluate
+huggingface_hub
+
+# Optimisation
+optuna
+
+# Utilitaires et traitement de données
+scikit-learn
+pandas
+toml # Pour lire le fichier config.toml
