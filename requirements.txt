@@ -1,22 +1,13 @@
-# Fichier de dépendances pour l'environnement d'optimisation
+# Dépendances pour le projet Alpha-Evolver
 
-# PyTorch - Note: Le Dockerfile gérera l'installation CPU/GPU
-# Nous listons ici la version CPU par défaut.
-torch
-torchvision
-torchaudio
+# Core pour LangGraph et LangChain
+langchain
+langgraph
 
-# Écosystème Hugging Face
-transformers
-datasets
-accelerate
-evaluate
-huggingface_hub
+# Clients pour les différents fournisseurs de LLM
+langchain-community # Pour Ollama et autres
+langchain-openai # Pour OpenAI
+langchain-huggingface # Pour les modèles Hugging Face
 
-# Optimisation
-optuna
-
-# Utilitaires et traitement de données
-scikit-learn
-pandas
-toml # Pour lire le fichier config.toml
+# Pour lire le fichier de configuration .ini
+configparser

@@ -1,107 +1,91 @@
-# Optimisation d'Algorithmes Hugging Face avec Optuna (et Docker)
+# Alpha-Evolver: Un Outil d'Optimisation de Code Basé sur les LLM
 
-Ce projet fournit un environnement conteneurisé avec Docker pour optimiser les hyperparamètres de modèles Hugging Face en utilisant Optuna.
+Alpha-Evolver est un framework expérimental conçu pour automatiser l'optimisation de code Python en utilisant des Large Language Models (LLM) et une approche évolutive. Il est piloté par un fichier de configuration unique pour une flexibilité maximale.
 
-## Objectif
+## Architecture
 
-L'objectif est de fournir un moyen simple, reproductible et portable pour lancer des expériences d'optimisation d'hyperparamètres. La configuration des expériences se fait via un simple fichier `config.toml`.
+Le cœur du système est construit avec **LangGraph**. Il orchestre une série d' "agents" (des fonctions Python) dans un flux de travail cyclique :
 
-## Contenu du Projet
-
-- `Dockerfile`: Le plan de construction de l'image Docker.
-- `requirements.txt`: La liste des dépendances Python.
-- `openevolve_project/`: Le répertoire contenant le code source.
-  - `optimize.py`: Le script Python qui lance l'optimisation.
-  - `config.toml`: **Le fichier de configuration principal.** C'est ici que vous définissez le modèle, le dataset, etc.
-- `setup.sh`: (Alternative) Un script pour une installation manuelle sans Docker.
+1.  **Chargement (`load_code`)**: Le code source est chargé depuis un répertoire.
+2.  **Génération (`generate_variations`)**: Le LLM configuré propose plusieurs versions améliorées du code.
+3.  **Test (`test_variations`)**: Chaque version est testée en exécutant une commande fournie (la "fonction de fitness"). La réussite et le temps d'exécution sont mesurés.
+4.  **Sélection (`select_best`)**: La meilleure variation qui réussit les tests est sélectionnée.
+5.  **Boucle**: Si une amélioration est trouvée, elle devient la base pour la prochaine "génération". Le processus se répète.
+6.  **Écriture (`write_output`)**: À la fin, le code final et les rapports sont écrits sur le disque.
 
 ---
 
-## Méthode Recommandée : Utilisation avec Docker
+## Structure du Projet
 
-Cette méthode est la plus simple et garantit la reproductibilité.
-
-### Prérequis
-- Docker doit être installé sur votre machine.
-
-### Étape 1 : Configurer votre expérience
-
-Avant de construire l'image, modifiez le fichier `openevolve_project/config.toml` pour définir votre expérience :
-```toml
-# openevolve_project/config.toml
-
-[model]
-name = "distilbert-base-uncased" # Nom du modèle
-
-[dataset]
-name = "imdb" # Nom du dataset
-num_samples_train = 1000 # -1 pour le dataset complet
-num_samples_eval = 500   # -1 pour le dataset complet
-
-[optimization]
-n_trials = 15 # Nombre d'essais Optuna
-study_name = "hf_study_docker" # Nom de la base de données de résultats
 ```
+.
+├── alpha_evolver/      # Code source du framework
+│   ├── agents.py       # Logique des nœuds du graphe
+│   ├── graph.py        # Assemblage du graphe LangGraph
+│   └── llm_provider.py # Fournisseur de clients LLM
+├── config/
+│   └── config.ini      # LE FICHIER DE CONFIGURATION CENTRAL
+├── logs/               # Les fichiers de log sont générés ici
+├── output/             # Le code amélioré et les rapports sont générés ici
+├── Dockerfile          # Pour construire l'image Docker
+├── main.py             # Point d'entrée de l'application
+└── requirements.txt    # Dépendances Python
+```
+
+---
+
+## Configuration (`config/config.ini`)
+
+C'est le panneau de contrôle de l'application. Vous devez le configurer avant de lancer l'outil.
+
+-   **`[paths]`**: Définissez les chemins pour le code source, les sorties et les logs.
+-   **`[llm]`**: Choisissez votre fournisseur (`ollama`, `openai`, etc.) et spécifiez le modèle et les clés API si nécessaire.
+-   **`[evolution]`**: Contrôlez le processus évolutif (nombre de générations, nombre de variations à tester).
+-   **`[fitness]`**: **La section la plus importante.**
+    -   `test_command`: La commande shell à exécuter pour valider une version du code (ex: `pytest`). L'outil s'attend à un code de sortie `0` en cas de succès.
+    -   `goal`: Le critère d'optimisation (`pass_rate` ou `execution_time`).
+-   **`[reporting]`**: Choisissez les rapports à générer.
+
+---
+
+## Utilisation avec Docker (Méthode Recommandée)
+
+### Étape 1 : Préparer votre environnement
+
+1.  **Code Source**: Placez le code que vous souhaitez optimiser dans un répertoire accessible par Docker (ex: `/root/mon_projet_a_tester`).
+2.  **Configuration**: Modifiez `config/config.ini` pour pointer vers ce répertoire et définir votre commande de test.
+    ```ini
+    [paths]
+    source_directory = /root/mon_projet_a_tester
+
+    [fitness]
+    test_command = pytest tests/
+    ```
 
 ### Étape 2 : Construire l'image Docker
 
-À la racine du projet, lancez la commande suivante. L'option `-t` permet de donner un nom à votre image (par exemple, `hf-optimizer`).
+À la racine du projet Alpha-Evolver, exécutez :
 ```bash
-docker build -t hf-optimizer .
-```
-Cette commande va lire le `Dockerfile`, télécharger les dépendances et créer votre image. Cela peut prendre plusieurs minutes la première fois.
-
-### Étape 3 : Lancer l'optimisation
-
-Une fois l'image construite, lancez un conteneur. Les résultats (`.db` et logs) seront créés à l'intérieur du conteneur.
-```bash
-docker run --rm hf-optimizer
-```
-- `--rm` : Supprime le conteneur automatiquement après son exécution.
-
-Pour extraire les résultats (la base de données SQLite), vous pouvez monter un volume :
-```bash
-# Crée un dossier "results" sur votre machine hôte
-mkdir -p results
-
-# Monte le dossier /app/openevolve_project/results du conteneur
-# vers le dossier "results" de votre machine hôte.
-docker run --rm -v "$(pwd)/results:/app/openevolve_project/results" hf-optimizer
+docker build -t alpha-evolver .
 ```
 
----
+### Étape 3 : Lancer le conteneur
 
-## Visualiser les Résultats
+C'est l'étape la plus importante. Vous devez **monter des volumes** pour que le conteneur puisse accéder à votre code et que vous puissiez récupérer les résultats.
 
-Après avoir extrait la base de données (ex: `hf_study_docker.db`), vous pouvez utiliser `optuna-dashboard`.
+```bash
+docker run --rm \
+  -v /root/mon_projet_a_tester:/root/mon_projet_a_tester \
+  -v $(pwd)/output:/app/output \
+  -v $(pwd)/logs:/app/logs \
+  alpha-evolver
+```
 
-1.  **Installez le dashboard** sur votre machine locale :
-    ```bash
-    pip install optuna-dashboard
-    ```
-2.  **Lancez le serveur** en pointant vers le fichier `.db` :
-    ```bash
-    optuna-dashboard sqlite:///results/hf_study_docker.db
-    ```
+**Explication des volumes (`-v`)** :
+-   `-v /root/mon_projet_a_tester:/root/mon_projet_a_tester`: Donne au conteneur l'accès en lecture/écriture à votre projet. **Le chemin avant les deux-points (`:`) doit être le chemin absolu sur votre machine hôte.**
+-   `-v $(pwd)/output:/app/output`: Mappe le dossier de sortie du conteneur à un dossier `output` sur votre machine hôte.
+-   `-v $(pwd)/logs:/app/logs`: Fait de même pour les logs.
 
----
+### **NOTE IMPORTANTE SUR L'IMPLÉMENTATION ACTUELLE**
 
-## Alternative : Installation Manuelle (sans Docker)
-
-Si vous ne souhaitez pas utiliser Docker, vous pouvez utiliser le script `setup.sh`.
-
-1.  **Rendre le script exécutable :**
-    ```bash
-    chmod +x setup.sh
-    ```
-2.  **Lancer le script :**
-    ```bash
-    ./setup.sh
-    ```
-3.  **Activer l'environnement et lancer le script :**
-    ```bash
-    cd openevolve_project
-    source env/bin/activate
-    python optimize.py
-    ```
-Cette méthode est moins portable et dépend de la configuration de votre système d'exploitation (conçu pour Debian/Ubuntu).
+L'agent `generate_code_variations` dans `alpha_evolver/agents.py` contient actuellement une **simulation** de l'appel au LLM. Il ne contacte pas réellement un LLM mais génère des variations factices. Pour une utilisation réelle, vous devrez remplacer la section `--- SIMULATION DE LA SORTIE LLM ---` par un véritable appel `llm_client.invoke(full_prompt)` et une logique pour parser la réponse du modèle.
