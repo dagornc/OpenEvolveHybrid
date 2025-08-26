@@ -1,0 +1,13 @@
+# Dépendances pour le projet Alpha-Evolver
+
+# Core pour LangGraph et LangChain
+langchain
+langgraph
+
+# Clients pour les différents fournisseurs de LLM
+langchain-community # Pour Ollama et autres
+langchain-openai # Pour OpenAI
+langchain-huggingface # Pour les modèles Hugging Face
+
+# Pour lire le fichier de configuration .ini
+configparser
